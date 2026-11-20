@@ -1,0 +1,375 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart';
+import 'package:latlong2/latlong.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:url_launcher/url_launcher.dart';
+
+const brandGreen = Color(0xFF123C32);
+const brandOrange = Color(0xFFF28C28);
+const brandLight = Color(0xFFF4F7F5);
+
+late final bool backendReady;
+SupabaseClient? get db => backendReady ? Supabase.instance.client : null;
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  const url = String.fromEnvironment('SUPABASE_URL');
+  const key = String.fromEnvironment('SUPABASE_ANON_KEY');
+  backendReady = url.isNotEmpty && key.isNotEmpty;
+  if (backendReady) {
+    await Supabase.initialize(url: url, anonKey: key);
+  }
+  runApp(const AkwabaApp());
+}
+
+class AkwabaApp extends StatelessWidget {
+  const AkwabaApp({super.key});
+
+  @override
+  Widget build(BuildContext context) => MaterialApp(
+    title: 'AKWABA GO',
+    debugShowCheckedModeBanner: false,
+    theme: ThemeData(
+      colorScheme: ColorScheme.fromSeed(seedColor: brandGreen),
+      scaffoldBackgroundColor: brandLight,
+      useMaterial3: true,
+      appBarTheme: const AppBarTheme(
+        backgroundColor: brandGreen, foregroundColor: Colors.white,
+      ),
+      inputDecorationTheme: InputDecorationTheme(
+        filled: true, fillColor: Colors.white,
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(14)),
+      ),
+    ),
+    home: const EntryPage(),
+  );
+}
+
+class EntryPage extends StatefulWidget {
+  const EntryPage({super.key});
+  @override
+  State<EntryPage> createState() => _EntryPageState();
+}
+
+class _EntryPageState extends State<EntryPage> {
+  String? role;
+  bool busy = false;
+  bool demoEntered = false;
+  final email = TextEditingController();
+  final password = TextEditingController();
+  final name = TextEditingController();
+
+  Future<void> submit(bool create) async {
+    if (!backendReady) {
+      setState(() => role = role ?? 'client');
+      return;
+    }
+    setState(() => busy = true);
+    try {
+      AuthResponse response;
+      if (create) {
+        response = await db!.auth.signUp(
+          email: email.text.trim(),
+          password: password.text,
+          data: {'full_name': name.text.trim(), 'role': role},
+        );
+        final user = response.user;
+        if (user != null) {
+          await db!.from('profiles').upsert({
+            'id': user.id,
+            'full_name': name.text.trim(),
+            'role': role,
+          });
+        }
+      } else {
+        response = await db!.auth.signInWithPassword(
+          email: email.text.trim(), password: password.text,
+        );
+      }
+      if (response.user != null && mounted) {
+        setState(() {});
+      }
+    } on AuthException catch (e) {
+      if (mounted) _message(e.message);
+    } catch (e) {
+      if (mounted) _message('Erreur : $e');
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  void _message(String text) => ScaffoldMessenger.of(context)
+      .showSnackBar(SnackBar(content: Text(text)));
+
+  @override
+  Widget build(BuildContext context) {
+    final user = db?.auth.currentUser;
+    if (user != null || demoEntered) {
+      final activeRole = role ??
+          (db?.auth.currentUser?.userMetadata?['role'] as String?) ?? 'client';
+      return HomePage(role: activeRole);
+    }
+    return Scaffold(
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(22),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Icon(Icons.local_taxi, size: 72, color: brandOrange),
+                const SizedBox(height: 8),
+                const Text('AKWABA GO', textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 32, fontWeight: FontWeight.w900,
+                    color: brandGreen, letterSpacing: 1.2)),
+                const Text('Bienvenue à bord !', textAlign: TextAlign.center),
+                const SizedBox(height: 24),
+                if (!backendReady)
+                  const Card(child: Padding(
+                    padding: EdgeInsets.all(12),
+                    child: Text('Mode démonstration : connecte Supabase pour activer les comptes et les courses.'),
+                  )),
+                const Text('Choisis ton espace',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+                const SizedBox(height: 12),
+                _roleButton('client', 'Je suis client', Icons.person),
+                const SizedBox(height: 8),
+                _roleButton('driver', 'Je suis chauffeur', Icons.drive_eta),
+                const SizedBox(height: 18),
+                TextField(controller: name, decoration:
+                  const InputDecoration(labelText: 'Nom complet (inscription)')),
+                const SizedBox(height: 10),
+                TextField(controller: email, keyboardType: TextInputType.emailAddress,
+                  decoration: const InputDecoration(labelText: 'Adresse e-mail')),
+                const SizedBox(height: 10),
+                TextField(controller: password, obscureText: true,
+                  decoration: const InputDecoration(labelText: 'Mot de passe')),
+                const SizedBox(height: 14),
+                FilledButton(
+                  onPressed: busy ? null : () => submit(true),
+                  child: Text(busy ? 'Patiente…' : 'Créer mon compte'),
+                ),
+                TextButton(
+                  onPressed: busy ? null : () => submit(false),
+                  child: const Text('J’ai déjà un compte : me connecter'),
+                ),
+                if (!backendReady)
+                  OutlinedButton(
+                    onPressed: role == null ? null : () => setState(() => demoEntered = true),
+                    child: const Text('Tester cet espace en démonstration'),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _roleButton(String value, String label, IconData icon) =>
+    OutlinedButton.icon(
+      onPressed: () => setState(() => role = value),
+      icon: Icon(icon),
+      label: Text(role == value ? '$label ✓' : label),
+      style: OutlinedButton.styleFrom(
+        foregroundColor: brandGreen,
+        side: BorderSide(color: role == value ? brandOrange : brandGreen),
+        padding: const EdgeInsets.all(14),
+      ),
+    );
+}
+
+class HomePage extends StatefulWidget {
+  const HomePage({super.key, required this.role});
+  final String role;
+  @override
+  State<HomePage> createState() => _HomePageState();
+}
+
+class _HomePageState extends State<HomePage> {
+  LatLng current = const LatLng(5.3599, -4.0083); // Abidjan par défaut
+  bool locating = false;
+  bool available = false;
+  final destination = TextEditingController();
+  final vehicle = TextEditingController(text: 'Toyota Vitz');
+  final seats = TextEditingController(text: '5');
+  final plate = TextEditingController();
+
+  Future<void> locate() async {
+    setState(() => locating = true);
+    try {
+      if (!await Geolocator.isLocationServiceEnabled()) {
+        throw Exception('Active le GPS de ton téléphone.');
+      }
+      var permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+      if (permission == LocationPermission.denied ||
+          permission == LocationPermission.deniedForever) {
+        throw Exception('Autorisation GPS refusée.');
+      }
+      final p = await Geolocator.getCurrentPosition();
+      setState(() => current = LatLng(p.latitude, p.longitude));
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('$e')),
+      );
+    } finally {
+      if (mounted) setState(() => locating = false);
+    }
+  }
+
+  Future<void> createRide() async {
+    if (!backendReady) {
+      _msg('Connecte Supabase pour enregistrer une vraie demande de course.');
+      return;
+    }
+    final user = db!.auth.currentUser;
+    if (user == null) return;
+    if (destination.text.trim().isEmpty) {
+      _msg('Saisis ta destination.'); return;
+    }
+    try {
+      await db!.from('rides').insert({
+        'client_id': user.id,
+        'pickup_label': 'Ma position GPS',
+        'pickup_lat': current.latitude,
+        'pickup_lng': current.longitude,
+        'destination_label': destination.text.trim(),
+        'status': 'requested',
+      });
+      _msg('Demande envoyée aux chauffeurs disponibles.');
+    } catch (e) { _msg('Impossible de créer la course : $e'); }
+  }
+
+  Future<void> saveVehicle() async {
+    if (!backendReady || db!.auth.currentUser == null) {
+      _msg('Connecte Supabase pour enregistrer le véhicule.'); return;
+    }
+    final count = int.tryParse(seats.text) ?? 0;
+    if (count != 5) {
+      _msg('AKWABA GO accepte au maximum 5 places au total, chauffeur compris.');
+      return;
+    }
+    try {
+      await db!.from('vehicles').upsert({
+        'driver_id': db!.auth.currentUser!.id,
+        'make_model': vehicle.text.trim(),
+        'plate_number': plate.text.trim(),
+        'total_seats': count,
+        'status': 'pending',
+      });
+      _msg('Véhicule envoyé pour vérification.');
+    } catch (e) { _msg('Erreur : $e'); }
+  }
+
+  void _msg(String text) => ScaffoldMessenger.of(context)
+      .showSnackBar(SnackBar(content: Text(text)));
+
+  @override
+  Widget build(BuildContext context) {
+    final isDriver = widget.role == 'driver';
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(isDriver ? 'AKWABA GO CHAUFFEUR' : 'AKWABA GO'),
+        actions: [
+          IconButton(icon: const Icon(Icons.logout), onPressed: () async {
+            await db?.auth.signOut();
+            if (mounted) Navigator.of(context).pushAndRemoveUntil(
+              MaterialPageRoute(builder: (_) => const EntryPage()), (_) => false);
+          }),
+        ],
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          Card(color: brandGreen, child: const Padding(
+            padding: EdgeInsets.all(18),
+            child: Text('Bienvenue à bord !\\nLa mobilité ivoirienne, autrement.',
+              style: TextStyle(color: Colors.white, fontSize: 18,
+                fontWeight: FontWeight.bold)),
+          )),
+          SizedBox(
+            height: 260,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(18),
+              child: FlutterMap(
+                options: MapOptions(initialCenter: current, initialZoom: 12),
+                children: [
+                  TileLayer(
+                    urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                    userAgentPackageName: 'ci.akwabago.app',
+                  ),
+                  MarkerLayer(markers: [
+                    Marker(point: current, width: 44, height: 44,
+                      child: const Icon(Icons.location_pin, color: brandOrange, size: 42)),
+                  ]),
+                  RichAttributionWidget(attributions: [
+                    TextSourceAttribution('© OpenStreetMap contributors',
+                      onTap: () => launchUrl(Uri.parse('https://www.openstreetmap.org/copyright'))),
+                  ]),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 10),
+          OutlinedButton.icon(
+            onPressed: locating ? null : locate,
+            icon: const Icon(Icons.my_location),
+            label: Text(locating ? 'Localisation…' : 'Utiliser ma position GPS'),
+          ),
+          const SizedBox(height: 14),
+          if (!isDriver) ...[
+            const Text('Commander un véhicule',
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 10),
+            TextField(controller: destination,
+              decoration: const InputDecoration(
+                labelText: 'Où souhaites-tu aller ?',
+                prefixIcon: Icon(Icons.flag),
+              )),
+            const SizedBox(height: 10),
+            FilledButton.icon(
+              onPressed: createRide,
+              icon: const Icon(Icons.local_taxi),
+              label: const Text('Demander un chauffeur'),
+            ),
+            const SizedBox(height: 12),
+            const Text('Le prix et le chauffeur seront confirmés selon les règles de la plateforme.'),
+          ] else ...[
+            const Text('Espace chauffeur',
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+            SwitchListTile(
+              value: available,
+              onChanged: (v) => setState(() => available = v),
+              title: const Text('Je suis disponible'),
+              subtitle: const Text('Prototype local : disponibilité non publiée aux clients.'),
+            ),
+            TextField(controller: vehicle,
+              decoration: const InputDecoration(labelText: 'Modèle (ex. Suzuki Swift, Toyota Vitz)')),
+            const SizedBox(height: 8),
+            TextField(controller: plate,
+              decoration: const InputDecoration(labelText: 'Immatriculation')),
+            const SizedBox(height: 8),
+            TextField(controller: seats, keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: 'Nombre total de places, chauffeur compris (maximum 5)')),
+            const SizedBox(height: 8),
+            FilledButton(onPressed: saveVehicle,
+              child: const Text('Envoyer mon véhicule pour validation')),
+            const SizedBox(height: 12),
+            const Card(child: ListTile(
+              leading: Icon(Icons.workspace_premium, color: brandOrange),
+              title: Text('Abonnement chauffeur'),
+              subtitle: Text('Le paiement Wave sera activé après configuration du compte Wave Business et du serveur sécurisé.'),
+            )),
+          ],
+          const SizedBox(height: 18),
+          const Text('AKWABA GO • Côte d’Ivoire',
+            textAlign: TextAlign.center, style: TextStyle(color: Colors.black54)),
+        ],
+      ),
+    );
+  }
+}
